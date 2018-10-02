@@ -8,6 +8,11 @@
 pair-wise distances will have to be counted for each
 set of nodes added....is this feasible?
 
+to do
+----
+I need to figure out if I want this to be pure c or
+run in python, because I can't use the python code
+base without running the interpreter
 */
 
 #ifdef ALLOCATE_PyHEAP
@@ -20,8 +25,6 @@ set of nodes added....is this feasible?
 #    define GeoGraph_REALLOC(ob, x) realloc((ob), (x))
 #endif
 
-#define GeoGraph_HEAD PyObject_HEAD
-
 #ifndef GEONODE_DEFAULT_ALLOC
 #  define GEONODE_DEFAULT_ALLOC 10
 #endif
@@ -31,8 +34,8 @@ set of nodes added....is this feasible?
 int tests_run = 0;
 
 #define TEST(x) test_##x
-#define FAIL() printf("%s -> failed line %d\n", __func__, __LINE__)
-#define PASS(test) printf("%s -> passed - %d tests passed \n", #test, tests_run)
+#define FAIL() printf("%s -> failed (line %d)\n", __func__, __LINE__)
+#define PASS(test) tests_run++; printf("%s -> passed - %d tests passed \n", #test, tests_run)
 #define _assert(test) \
     do { \
         if (!(test)) { \
@@ -44,14 +47,19 @@ int tests_run = 0;
 #define _verify(test) \
     do { \
         int r = test(); \
-        tests_run++; \
         if(!r) { \
             PASS(test); \
         } \
     } while(0)
 
+typedef struct {
+    /* edge node */
+    GeoNode *lv;
+    GeoNode *rv;
+} Edge;
+
 typedef struct _geonode {
-    GeoGraph_HEAD
+    PyObject_HEAD
     PyObject *index;
     struct _geonode *next;
     struct _geonode *prev;
@@ -65,7 +73,7 @@ typedef struct _geonode {
 
 /* double linked list */
 typedef struct _geograph {
-    GeoGraph_HEAD
+    PyObject_HEAD
     struct _geonode *head;
     struct _geonode *tail;
     double (* isedge)(GeoNode *, GeoNode *);
@@ -73,20 +81,20 @@ typedef struct _geograph {
 } GeoGraph;
 
 typedef struct _geograph_iter {
-    GeoGraph_HEAD
+    PyObject_HEAD
     struct _geonode *_current;
     size_t _rank;
 } GeoGraphIter;
 
 typedef struct _geonode_iter {
-    GeoGraph_HEAD
+    PyObject_HEAD
     GeoNode *_node;
     size_t _cur;
     size_t _size;
 } GeoNodeIter;
 
 typedef struct {
-    GeoGraph_HEAD
+    PyObject_HEAD
     struct _geonode **nodes;
     size_t size;
 } ConnectedEdges;
@@ -160,17 +168,19 @@ geonodeiter_new(GeoNode *node)
 static int
 geonode_richcompare(GeoNode *self, GeoNode *other, int opid)
 {
-    if (self->index == NULL || other->index == NULL)
-        return 0;
-
-    switch (opid) {
-        case Py_EQ:
-            return PyObject_RichCompareBool(self->index, other->index, opid);
-        case Py_NE:
-            return !PyObject_RichCompareBool(self->index, other->index, opid);
-        default:
-            return 0;
+    int result;
+    if (self && other && (self == other || self->index == other->index))
+        if (self->index && other->index)
+            result = 1;
+        else
+            result = 0;
+    else if (self->index == NULL || other->index == NULL)
+        result = 0;
+    else {
+        result = PyObject_RichCompareBool(self->index, other->index, opid);
     }
+
+    return result;
 }
 
 static GeoNode *
@@ -196,9 +206,10 @@ geonode_exists(GeoNode *self, GeoNode *other)
 
     while ((nd = geonodeiter_next(it)) != NULL) {
         if (other->index &&
-                PyObject_RichCompare(other->index, nd->index, Py_EQ))
+                PyObject_RichCompare(other->index, nd->index, Py_EQ)) {
             GeoGraph_FREE(it);
             return 1;
+        }
     }
     return 0;
 }
@@ -211,8 +222,10 @@ geonode_appendnode(GeoNode *self, GeoNode *node)
     if (self->_alloc <= self->_used) {
         sz = self->_alloc * 2;
         void *ptr = GeoGraph_REALLOC(self->leafs, sz*sizeof(GeoNode *));
-        if (ptr == NULL)
+        if (ptr == NULL) {
+            fprintf(stderr, "could not reallocate space for leafs\n");
             return 0;
+        }
         self->_alloc = sz;
         self->leafs = (GeoNode **)ptr;
     }
@@ -319,11 +332,11 @@ geograph_count(GeoGraph *graph)
     it = geographiter_new(graph);
     while (geographiter_next(it) != NULL);
 
-    return it->_rank;
+    return it->_rank + 1;
 }
 
 /* forward declare  */
-static int _geograph_findedges(GeoGraph *, GeoNode *, double d,
+static int _geograph_findedges(GeoGraph *, GeoNode *,
       double (*isedge)(GeoNode *, GeoNode *));
 
 static GeoGraphIter *geographiter_new(GeoGraph *graph);
@@ -339,9 +352,10 @@ geograph_contains(GeoGraph *graph, GeoNode *node)
         return 0;
     else {
         // TODO: not ideal. linear lookup
-        while ((nd = geographiter_next(it)) != NULL)
+        while ((nd = geographiter_next(it)) != NULL) {
             if (geonode_richcompare(nd, node, Py_EQ))
                 return 1;
+        }
         return 0;
     }
 
@@ -354,6 +368,7 @@ geograph_append(GeoGraph *graph, GeoNode *node)
     if (geograph_isempty(graph)) {
         graph->head = node;
         graph->tail = node;
+    // don't append nodes with an index already in the graph
     } else if (!geograph_contains(graph, node)) {
 
         struct _geonode *last = graph->tail;
@@ -367,7 +382,7 @@ geograph_append(GeoGraph *graph, GeoNode *node)
         last->next = node;
         node->prev = last;
         graph->tail = node;
-        if (_geograph_findedges(graph, node, graph->thresh, graph->isedge)) {
+        if (!_geograph_findedges(graph, node, graph->isedge)) {
             return 0;
         }
     }
@@ -383,7 +398,7 @@ geographiter_new(GeoGraph *graph)
     if (it == NULL)
         return NULL;
     else {
-        it->_rank = 0;
+        it->_rank = -1; // pointing to head
         it->_current = graph->head;
     }
     return it;
@@ -393,17 +408,19 @@ static GeoNode *
 geographiter_next(GeoGraphIter *it)
 {
     GeoNode *next;
-    if (it->_current->next == NULL)
-        next = NULL;
-    next = it->_current->next;
-    it->_current = it->_current->next;
-    it->_rank++;
-    return next;
+    if (it->_current == NULL)
+        return NULL;
+    else {
+        next = it->_current;
+        it->_current = it->_current->next;
+        it->_rank++;
+        return next;
+    }
 }
 
 /* search the graph for all near neighbors within a distance threshold d */
 static int
-_geograph_findedges(GeoGraph *graph, GeoNode *node, double d,
+_geograph_findedges(GeoGraph *graph, GeoNode *node,
                    double (*isedge)(GeoNode *, GeoNode *))
 {
     /* TODO: fix this. Super dangerous, should not mutate if "finding"
@@ -412,7 +429,7 @@ _geograph_findedges(GeoGraph *graph, GeoNode *node, double d,
     */
     GeoGraphIter *it;
     GeoNode *nd;
-    double distance;
+    double distance, d = graph->thresh;
 
     if (isedge == NULL) {
         isedge = graph->isedge;
@@ -420,6 +437,9 @@ _geograph_findedges(GeoGraph *graph, GeoNode *node, double d,
 
     it = geographiter_new(graph);
     while ((nd = geographiter_next(it)) != NULL) {
+         // not an edge if it's itself
+         if (nd == node)
+             continue;
          // calculate distance
          distance = (*isedge)(node, nd);
          if (distance <= d) {
@@ -493,18 +513,17 @@ int TEST(geonode_appendnode_01)()
 
 int TEST(geonode_appendnode_realloc_01)()
 {
-    GeoNode *self = geonode_new(PyLong_FromLong(1), 88.3, -33.4);
+    GeoNode *self = geonode_new(NULL, 88.3, -33.4);
 
     size_t i;
     for (i = 0; i < GEONODE_DEFAULT_ALLOC * 2 + 1; ++i) {
         _assert(geonode_appendnode(self,
-            geonode_new(PyLong_FromLong(i + 2), 88.3 + (int)i, -33.4 - (int)i)
+            geonode_new(NULL, 88.3 + (int)i, -33.4 - (int)i)
         ));
     }
 
-    _assert(self->_used = GEONODE_DEFAULT_ALLOC * 2);
-    printf("self->_alloc = %zu\n", self->_alloc);
-    _assert(self->_alloc == 40, "self->_alloc: %zu != 40\n", self->_alloc);
+    _assert(self->_used == GEONODE_DEFAULT_ALLOC * 2 + 1);
+    _assert(self->_alloc == 40);
     return 0;
 }
 
@@ -530,17 +549,19 @@ int TEST(geonode_connectnodes_01)()
     return 0;
 }
 
+
 int TEST(geograph_findedges_01)()
 {
     GeoGraph *gg = geograph_new();
+    gg->thresh = 2.0;
     GeoNode *node;
     GeoNode *nodes[] = {
-        geonode_new(NULL, 88.3, -33.4),
-        geonode_new(NULL, 89.3, -23.4),
-        geonode_new(NULL, 87.3, -25.4),
-        geonode_new(NULL, 98.3, -13.4),
-        geonode_new(NULL, 99.3, -15.4),
-        geonode_new(NULL, 97.3, -15.4)
+        geonode_new(PyLong_FromLong(0), 3.1, -4.1),
+        geonode_new(PyLong_FromLong(1), 3.2, -4.2),
+        geonode_new(PyLong_FromLong(2), 3.3, -4.3),
+        geonode_new(PyLong_FromLong(3), -3.0, 4.0),
+        geonode_new(PyLong_FromLong(4), -3.0, 4.0),
+        geonode_new(PyLong_FromLong(5), -3.0, 4.0)
     };
 
     size_t i;
@@ -550,7 +571,7 @@ int TEST(geograph_findedges_01)()
 
     node = nodes[0];
 
-    _assert(_geograph_findedges(gg, node, 11., NULL));
+    printf("node->_used = %zu\n", node->_used);
     _assert(node->_used == 2);
     return 0;
 }
@@ -559,9 +580,9 @@ int TEST(geograph_count_01)()
 {
     GeoGraph *gg = geograph_new();
     GeoNode *nodes[] = {
-        geonode_new(NULL, 88.3, -33.4),
-        geonode_new(NULL, 89.3, -23.4),
-        geonode_new(NULL, 87.3, -25.4),
+        geonode_new(PyLong_FromLong(1), 88.3, -33.4),
+        geonode_new(PyLong_FromLong(1), 89.3, -23.4),
+        geonode_new(PyLong_FromLong(2), 87.3, -25.4),
         geonode_new(NULL, 98.3, -13.4),
         geonode_new(NULL, 99.3, -15.4),
         geonode_new(NULL, 97.3, -15.4)
@@ -572,13 +593,15 @@ int TEST(geograph_count_01)()
         _assert(geograph_append(gg, nodes[i]));
     }
 
-    _assert(geograph_count(gg) == 6);
+    _assert(geograph_count(gg) == 5);
 
-    geograph_append(gg, geonode_new(NULL, 66.4, 55.6));
-    _assert(geograph_count(gg) == 7);
+    geograph_append(gg, geonode_new(PyLong_FromLong(2), 66.4, 55.6)); // index already exists
+    _assert(geograph_count(gg) == 5);
+    GeoNode *nd = geonode_new(NULL, 55.5, 44.5);
+    geograph_append(gg, nd);
+    _assert(geograph_count(gg) == 6);
     return 0;
 }
-
 
 
 int geograph_run_all_tests()
@@ -596,5 +619,6 @@ int geograph_run_all_tests()
 
 int main(int argc, const char **argv)
 {
+    Py_Initialize();
     return geograph_run_all_tests();
 }
