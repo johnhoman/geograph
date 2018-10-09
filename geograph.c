@@ -52,12 +52,6 @@ int tests_run = 0;
         } \
     } while(0)
 
-typedef struct {
-    /* edge node */
-    GeoNode *lv;
-    GeoNode *rv;
-} Edge;
-
 typedef struct _geonode {
     PyObject_HEAD
     PyObject *index;
@@ -98,6 +92,13 @@ typedef struct {
     struct _geonode **nodes;
     size_t size;
 } ConnectedEdges;
+
+typedef struct {
+    /* edge node */
+    GeoNode *lv;
+    GeoNode *rv;
+} Edge;
+
 
 static int
 geonode_allocate_connections(GeoNode *nd)
@@ -140,7 +141,6 @@ geonode_new(PyObject *index, double lat, double lon)
 
 /* leafs are all connected via linked list,
    so they can be taken care of during the graph dealloc */
-
 deallocator
 geonode_dealloc(GeoNode *self)
 {
@@ -193,7 +193,7 @@ geonodeiter_next(GeoNodeIter *it)
     }
 }
 
-/* check if node already exists int he leafs */
+/* check if node already exists in the leafs */
 static int
 geonode_exists(GeoNode *self, GeoNode *other)
 {
@@ -205,12 +205,16 @@ geonode_exists(GeoNode *self, GeoNode *other)
         return 0;
 
     while ((nd = geonodeiter_next(it)) != NULL) {
-        if (other->index &&
-                PyObject_RichCompare(other->index, nd->index, Py_EQ)) {
+        /* points to same object or the index is the same
+           and both cannot be null*/
+        if (nd && other && (nd == other ||
+                PyObject_RichCompareBool(other->index, nd->index, Py_EQ))) {
             GeoGraph_FREE(it);
             return 1;
         }
     }
+
+    // does not exist
     return 0;
 }
 
@@ -219,17 +223,17 @@ geonode_appendnode(GeoNode *self, GeoNode *node)
 {
     size_t sz;
 
-    if (self->_alloc <= self->_used) {
-        sz = self->_alloc * 2;
-        void *ptr = GeoGraph_REALLOC(self->leafs, sz*sizeof(GeoNode *));
-        if (ptr == NULL) {
-            fprintf(stderr, "could not reallocate space for leafs\n");
-            return 0;
+    if (self != node && !geonode_exists(self, node)) {
+        if (self->_alloc <= self->_used) {
+            sz = self->_alloc * 2;
+            void *ptr = GeoGraph_REALLOC(self->leafs, sz*sizeof(GeoNode *));
+            if (ptr == NULL) {
+                fprintf(stderr, "could not reallocate space for leafs\n");
+                return 0;
+            }
+            self->_alloc = sz;
+            self->leafs = (GeoNode **)ptr;
         }
-        self->_alloc = sz;
-        self->leafs = (GeoNode **)ptr;
-    }
-    if (!geonode_exists(self, node)) {
         self->leafs[self->_used++] = node;
         self->leafs[self->_used] = NULL;
     }
@@ -438,15 +442,18 @@ _geograph_findedges(GeoGraph *graph, GeoNode *node,
     it = geographiter_new(graph);
     while ((nd = geographiter_next(it)) != NULL) {
          // not an edge if it's itself
-         if (nd == node)
+         // nd == node should be the tail of the list
+         if (nd == node) {
              continue;
+         }
          // calculate distance
          distance = (*isedge)(node, nd);
          if (distance <= d) {
-             if (!geonode_appendnode(node, nd) ||
-                     !geonode_appendnode(nd, node)) {
-                 /* could not reallocated memory probably - regardless
-                    return with error.
+             if (geonode_connectnodes(node, nd))
+                 return 1;
+             else {
+                 /* probably couldn't allocate memory. error message
+                    should be handled in geonode_connectnodes. Just return 0
                  */
                  return 0;
              }
@@ -454,7 +461,6 @@ _geograph_findedges(GeoGraph *graph, GeoNode *node,
     }
     return 1;
 }
-
 
 int TEST(geograph_append_01)(void)
 {
@@ -513,12 +519,12 @@ int TEST(geonode_appendnode_01)()
 
 int TEST(geonode_appendnode_realloc_01)()
 {
-    GeoNode *self = geonode_new(NULL, 88.3, -33.4);
+    GeoNode *self = geonode_new(PyLong_FromLong(0), 88.3, -33.4);
 
     size_t i;
     for (i = 0; i < GEONODE_DEFAULT_ALLOC * 2 + 1; ++i) {
         _assert(geonode_appendnode(self,
-            geonode_new(NULL, 88.3 + (int)i, -33.4 - (int)i)
+            geonode_new(PyLong_FromLong(i + 1), 88.3 + (int)i, -33.4 - (int)i)
         ));
     }
 
@@ -529,9 +535,9 @@ int TEST(geonode_appendnode_realloc_01)()
 
 int TEST(geonode_connectnodes_01)()
 {
-    GeoNode *a = geonode_new(NULL, 88.3, -33.4);
-    GeoNode *b = geonode_new(NULL, 89.3, -23.4);
-    GeoNode *c = geonode_new(NULL, 87.3, -25.4);
+    GeoNode *a = geonode_new(PyLong_FromLong(1), 88.3, -33.4);
+    GeoNode *b = geonode_new(PyLong_FromLong(10), 89.3, -23.4);
+    GeoNode *c = geonode_new(PyLong_FromLong(101), 87.3, -25.4);
 
     _assert(geonode_connectnodes(a, b));
     _assert(geonode_connectnodes(a, c));
@@ -549,16 +555,15 @@ int TEST(geonode_connectnodes_01)()
     return 0;
 }
 
-
 int TEST(geograph_findedges_01)()
 {
     GeoGraph *gg = geograph_new();
     gg->thresh = 2.0;
     GeoNode *node;
     GeoNode *nodes[] = {
-        geonode_new(PyLong_FromLong(0), 3.1, -4.1),
-        geonode_new(PyLong_FromLong(1), 3.2, -4.2),
-        geonode_new(PyLong_FromLong(2), 3.3, -4.3),
+        geonode_new(PyLong_FromLong(0), 3., -4.),
+        geonode_new(PyLong_FromLong(1), 3., -4.),
+        geonode_new(PyLong_FromLong(2), 3., -4.),
         geonode_new(PyLong_FromLong(3), -3.0, 4.0),
         geonode_new(PyLong_FromLong(4), -3.0, 4.0),
         geonode_new(PyLong_FromLong(5), -3.0, 4.0)
@@ -570,8 +575,6 @@ int TEST(geograph_findedges_01)()
     }
 
     node = nodes[0];
-
-    printf("node->_used = %zu\n", node->_used);
     _assert(node->_used == 2);
     return 0;
 }
@@ -603,6 +606,24 @@ int TEST(geograph_count_01)()
     return 0;
 }
 
+int TEST(geograph_connectedges)()
+{
+    GeoNode *a = geonode_new(PyLong_FromLong(1), 0, 0);
+    GeoNode *b = geonode_new(PyLong_FromLong(2), 1, 0);
+    GeoNode *c = geonode_new(PyLong_FromLong(3), 1, 0);
+
+    _assert(geonode_connectnodes(a, b));
+
+    _assert(a->_used == 1);
+    _assert(a->leafs[0] == b);
+    _assert(b->_used == 1);
+    _assert(b->leafs[0] == a);
+    _assert(geonode_connectnodes(a, c));
+    _assert(a->_used == 2);
+    _assert(a->leafs[1] == c);
+    return 0;
+}
+
 
 int geograph_run_all_tests()
 {
@@ -612,6 +633,7 @@ int geograph_run_all_tests()
     _verify(TEST(geonode_appendnode_01));
     _verify(TEST(geonode_appendnode_realloc_01));
     _verify(TEST(geonode_connectnodes_01));
+    _verify(TEST(geograph_connectedges));
     _verify(TEST(geograph_findedges_01));
     _verify(TEST(geograph_count_01));
     return 0;
