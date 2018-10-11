@@ -57,12 +57,10 @@ typedef struct _geonode {
     PyObject *index;
     struct _geonode *next;
     struct _geonode *prev;
+    PyObject *leafs;
     double lat;
     double lon;
-    struct _geonode **leafs;
-    size_t _alloc;
-    size_t _used;
-    int8_t _visited;
+    int8_t _visited:1;
 } GeoNode;
 
 /* double linked list */
